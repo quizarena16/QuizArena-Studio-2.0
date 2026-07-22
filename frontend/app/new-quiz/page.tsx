@@ -1,382 +1,299 @@
 "use client";
 
 import Link from "next/link";
-import { useEffect, useMemo, useState } from "react";
-import type { SavedQuiz } from "@/app/lib/slide-builder";
+import { useMemo, useState, type ReactNode } from "react";
+import {
+  buildSlidesFromQuiz,
+  getSlidesStorageKey,
+  type QuizQuestion,
+  type SavedQuiz,
+} from "@/app/lib/slide-builder";
 
-export default function MyQuizzesPage() {
-  const [quizzes, setQuizzes] = useState<SavedQuiz[]>([]);
-  const [search, setSearch] = useState("");
-  const [categoryFilter, setCategoryFilter] = useState("Alle");
+const QUIZ_STORAGE_KEY = "quizarena_quizzes";
+const DEFAULT_CTA = "Folge für mehr Fußball-Quizze ⚽";
+const DIFFICULTIES = ["Einsteiger", "Fortgeschritten", "Experte"] as const;
 
-  useEffect(() => {
-    if (typeof window === "undefined") return;
+type Difficulty = (typeof DIFFICULTIES)[number];
 
-    try {
-      const raw = localStorage.getItem("quizarena_quizzes");
-      if (!raw) {
-        setQuizzes([]);
-        return;
-      }
+const EMPTY_QUESTION: QuizQuestion = {
+  question: "",
+  answerA: "",
+  answerB: "",
+  answerC: "",
+  correctAnswer: "A",
+};
 
-      const parsed = JSON.parse(raw);
-      if (!Array.isArray(parsed)) {
-        setQuizzes([]);
-        return;
-      }
+export default function NewQuizPage() {
+  const [topic, setTopic] = useState("Bundesliga Legenden");
+  const [difficulty, setDifficulty] = useState<Difficulty>("Fortgeschritten");
+  const [questionCount, setQuestionCount] = useState(5);
+  const [title, setTitle] = useState("Bundesliga Legenden Quiz");
+  const [category, setCategory] = useState("Fußball");
+  const [cta, setCta] = useState(DEFAULT_CTA);
+  const [questions, setQuestions] = useState<QuizQuestion[]>(() =>
+    createGeneratedQuestions("Bundesliga Legenden", "Fortgeschritten", 5)
+  );
+  const [selectedIndex, setSelectedIndex] = useState(0);
+  const [status, setStatus] = useState("");
 
-      setQuizzes(parsed as SavedQuiz[]);
-    } catch {
-      setQuizzes([]);
-    }
-  }, []);
+  const selectedQuestion = questions[selectedIndex] ?? questions[0];
+  const answeredQuestions = useMemo(
+    () => questions.filter((question) => hasQuestionContent(question)).length,
+    [questions]
+  );
 
-  function handleDeleteQuiz(id: string) {
-    const confirmed = window.confirm(
-      "Willst du dieses Quiz wirklich löschen?"
+  function handleGenerateAiQuestions() {
+    const safeTopic = topic.trim() || "Fußball";
+    const generated = createGeneratedQuestions(safeTopic, difficulty, questionCount);
+
+    setTitle(`${safeTopic} Quiz`);
+    setCategory(safeTopic);
+    setQuestions(generated);
+    setSelectedIndex(0);
+    setStatus(`${generated.length} KI-Fragen wurden erzeugt.`);
+  }
+
+  function updateQuestion(index: number, patch: Partial<QuizQuestion>) {
+    setQuestions((current) =>
+      current.map((question, questionIndex) =>
+        questionIndex === index ? { ...question, ...patch } : question
+      )
     );
+  }
 
-    if (!confirmed) return;
+  function addQuestion() {
+    setQuestions((current) => [...current, { ...EMPTY_QUESTION }]);
+    setSelectedIndex(questions.length);
+  }
 
-    const next = quizzes.filter((quiz) => quiz.id !== id);
-    setQuizzes(next);
+  function duplicateQuestion(index: number) {
+    setQuestions((current) => {
+      const next = [...current];
+      next.splice(index + 1, 0, { ...current[index] });
+      return next;
+    });
+    setSelectedIndex(index + 1);
+  }
+
+  function removeQuestion(index: number) {
+    setQuestions((current) => {
+      if (current.length === 1) return [{ ...EMPTY_QUESTION }];
+      return current.filter((_, questionIndex) => questionIndex !== index);
+    });
+    setSelectedIndex((current) => Math.max(0, Math.min(current - 1, questions.length - 2)));
+  }
+
+  function buildQuiz(): SavedQuiz {
+    return {
+      id: createId(),
+      title: title.trim() || `${topic.trim() || "Fußball"} Quiz`,
+      category: category.trim() || topic.trim() || "Fußball",
+      cta: cta.trim() || DEFAULT_CTA,
+      createdAt: new Date().toISOString(),
+      questions: questions.map(normalizeQuestion).filter(hasQuestionContent),
+    };
+  }
+
+  function saveQuiz() {
+    const quiz = buildQuiz();
+
+    if (!quiz.questions.length) {
+      setStatus("Bitte lege mindestens eine Frage an.");
+      return;
+    }
 
     try {
-      localStorage.setItem("quizarena_quizzes", JSON.stringify(next));
+      const raw = localStorage.getItem(QUIZ_STORAGE_KEY);
+      const parsed = raw ? JSON.parse(raw) : [];
+      const existingQuizzes = Array.isArray(parsed) ? (parsed as SavedQuiz[]) : [];
+      const nextQuizzes = [quiz, ...existingQuizzes];
+      const slides = buildSlidesFromQuiz(quiz);
+
+      localStorage.setItem(QUIZ_STORAGE_KEY, JSON.stringify(nextQuizzes));
+      localStorage.setItem(getSlidesStorageKey(quiz.id), JSON.stringify(slides));
+      setStatus("Quiz gespeichert und Slides vorbereitet.");
     } catch (error) {
       console.error(error);
-      alert("Das Quiz konnte nicht gelöscht werden.");
+      setStatus("Das Quiz konnte nicht gespeichert werden.");
     }
   }
 
-  const categories = useMemo(() => {
-    const unique = Array.from(
-      new Set(
-        quizzes
-          .map((quiz) => quiz.category?.trim())
-          .filter(Boolean)
-      )
-    ) as string[];
+  function exportQuiz() {
+    const quiz = buildQuiz();
+    const payload = JSON.stringify({ quiz, slides: buildSlidesFromQuiz(quiz) }, null, 2);
+    const blob = new Blob([payload], { type: "application/json" });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement("a");
 
-    return ["Alle", ...unique];
-  }, [quizzes]);
-
-  const filteredQuizzes = useMemo(() => {
-    const term = search.trim().toLowerCase();
-
-    return quizzes.filter((quiz) => {
-      const matchesSearch =
-        !term ||
-        quiz.title.toLowerCase().includes(term) ||
-        quiz.category.toLowerCase().includes(term) ||
-        quiz.questions.some((question) =>
-          question.question.toLowerCase().includes(term)
-        );
-
-      const matchesCategory =
-        categoryFilter === "Alle" || quiz.category === categoryFilter;
-
-      return matchesSearch && matchesCategory;
-    });
-  }, [quizzes, search, categoryFilter]);
-
-  const totalQuestions = useMemo(() => {
-    return quizzes.reduce((sum, quiz) => sum + quiz.questions.length, 0);
-  }, [quizzes]);
+    link.href = url;
+    link.download = `${slugify(quiz.title)}.json`;
+    link.click();
+    URL.revokeObjectURL(url);
+    setStatus("Export wurde gestartet.");
+  }
 
   return (
-    <main className="min-h-screen bg-black px-6 py-8 text-white md:px-10 md:py-10">
-      <div className="mx-auto max-w-[1800px]">
-        <div className="mb-10 flex flex-col gap-6 xl:flex-row xl:items-start xl:justify-between">
+    <main className="min-h-screen overflow-hidden bg-[#05070c] text-white">
+      <div className="pointer-events-none fixed inset-0 bg-[radial-gradient(circle_at_top_left,rgba(163,230,53,0.22),transparent_34%),radial-gradient(circle_at_80%_10%,rgba(59,130,246,0.14),transparent_30%),linear-gradient(180deg,#05070c_0%,#09090b_100%)]" />
+      <div className="relative mx-auto max-w-[1900px] px-5 py-6 md:px-8 lg:px-10">
+        <header className="mb-6 flex flex-col gap-5 rounded-[34px] border border-white/10 bg-white/[0.04] p-5 shadow-2xl shadow-black/40 backdrop-blur md:p-6 xl:flex-row xl:items-center xl:justify-between">
           <div>
-            <p className="text-sm uppercase tracking-[0.35em] text-zinc-500">
-              QuizArena Studio
+            <p className="text-xs font-bold uppercase tracking-[0.45em] text-lime-300/80">
+              QuizArena Studio 2.0
             </p>
-            <h1 className="mt-4 text-4xl font-black tracking-[-0.04em] md:text-7xl">
-              Meine Quizze
+            <h1 className="mt-3 text-4xl font-black tracking-[-0.05em] md:text-6xl">
+              Neues Quiz bauen
             </h1>
-            <p className="mt-4 max-w-4xl text-lg text-zinc-400 md:text-2xl">
-              Hier findest du alle gespeicherten Fußball-Quizze, kannst sie
-              öffnen, bearbeiten, Slides generieren oder löschen.
+            <p className="mt-3 max-w-3xl text-base leading-7 text-zinc-400 md:text-xl">
+              Schnellere Erstellung mit Top-Toolbar, fokussierter Fragenliste,
+              großem Editor und sticky Phone Preview.
             </p>
           </div>
+          <Link href="/my-quizzes" className="w-fit rounded-2xl border border-white/10 px-5 py-3 font-bold text-zinc-200 transition hover:bg-white/10">
+            Meine Quizze
+          </Link>
+        </header>
 
-          <div className="flex flex-wrap gap-3">
-            <Link
-              href="/"
-              className="rounded-[28px] border border-zinc-800 px-6 py-4 text-lg text-white transition hover:bg-zinc-900"
-            >
-              ← Zurück zur Startseite
-            </Link>
-
-            <Link
-              href="/new-quiz"
-              className="rounded-[28px] bg-lime-400 px-6 py-4 text-lg font-bold text-black transition hover:bg-lime-300"
-            >
-              + Neues Quiz
-            </Link>
+        <section className="sticky top-0 z-20 mb-6 rounded-[30px] border border-lime-300/20 bg-zinc-950/90 p-4 shadow-2xl shadow-lime-950/20 backdrop-blur-xl">
+          <div className="grid gap-3 lg:grid-cols-[1.4fr_210px_150px_auto_auto_auto] lg:items-end">
+            <ToolbarInput label="Thema" value={topic} onChange={setTopic} />
+            <label className="block">
+              <span className="mb-2 block text-xs font-black uppercase tracking-[0.28em] text-zinc-500">Schwierigkeit</span>
+              <select value={difficulty} onChange={(event) => setDifficulty(event.target.value as Difficulty)} className="h-12 w-full rounded-2xl border border-white/10 bg-black/50 px-4 font-bold text-white outline-none focus:border-lime-300">
+                {DIFFICULTIES.map((entry) => <option key={entry}>{entry}</option>)}
+              </select>
+            </label>
+            <ToolbarInput label="Anzahl Fragen" type="number" min={1} max={10} value={String(questionCount)} onChange={(value) => setQuestionCount(clamp(Number(value), 1, 10))} />
+            <ToolbarButton onClick={handleGenerateAiQuestions}>KI erzeugen</ToolbarButton>
+            <ToolbarButton onClick={saveQuiz} variant="primary">Speichern</ToolbarButton>
+            <ToolbarButton onClick={exportQuiz}>Export</ToolbarButton>
           </div>
-        </div>
+          {status ? <p className="mt-3 text-sm font-semibold text-lime-200">{status}</p> : null}
+        </section>
 
-        <div className="mb-8 grid gap-6 xl:grid-cols-[1.1fr_0.9fr]">
-          <section className="rounded-[36px] border border-zinc-800 bg-zinc-950 p-6 md:p-8">
-            <div className="mb-8">
-              <p className="text-sm uppercase tracking-[0.35em] text-zinc-500">
-                Übersicht
-              </p>
-              <h2 className="mt-3 text-3xl font-black tracking-[-0.03em] md:text-5xl">
-                Dashboard
-              </h2>
-            </div>
-
-            <div className="grid gap-4 md:grid-cols-3">
-              <DashboardCard
-                label="Gespeicherte Quizze"
-                value={String(quizzes.length)}
-              />
-              <DashboardCard
-                label="Fragen insgesamt"
-                value={String(totalQuestions)}
-              />
-              <DashboardCard
-                label="Gefilterte Quizze"
-                value={String(filteredQuizzes.length)}
-              />
-            </div>
-          </section>
-
-          <section className="rounded-[36px] border border-zinc-800 bg-zinc-950 p-6 md:p-8">
-            <div className="mb-8">
-              <p className="text-sm uppercase tracking-[0.35em] text-zinc-500">
-                Filter
-              </p>
-              <h2 className="mt-3 text-3xl font-black tracking-[-0.03em] md:text-5xl">
-                Suche & Kategorien
-              </h2>
-            </div>
-
-            <div className="grid gap-5">
-              <label className="block">
-                <p className="mb-3 text-sm uppercase tracking-[0.3em] text-zinc-500">
-                  Suche
-                </p>
-                <input
-                  value={search}
-                  onChange={(e) => setSearch(e.target.value)}
-                  placeholder="Quiztitel, Kategorie oder Frage suchen..."
-                  className="w-full rounded-[24px] border border-zinc-800 bg-black px-5 py-4 text-lg text-white outline-none transition placeholder:text-zinc-600 focus:border-lime-400"
-                />
-              </label>
-
+        <div className="grid gap-6 xl:grid-cols-[320px_minmax(0,1fr)_390px]">
+          <aside className="rounded-[34px] border border-white/10 bg-white/[0.045] p-4 backdrop-blur">
+            <div className="mb-4 flex items-center justify-between">
               <div>
-                <p className="mb-3 text-sm uppercase tracking-[0.3em] text-zinc-500">
-                  Kategorie
-                </p>
+                <p className="text-xs font-black uppercase tracking-[0.3em] text-zinc-500">Fragenliste</p>
+                <h2 className="mt-1 text-2xl font-black">{questions.length} Fragen</h2>
+              </div>
+              <button type="button" onClick={addQuestion} className="rounded-2xl bg-lime-300 px-4 py-3 text-sm font-black text-black">+</button>
+            </div>
+            <div className="space-y-3">
+              {questions.map((question, index) => (
+                <button key={index} type="button" onClick={() => setSelectedIndex(index)} className={`w-full rounded-3xl border p-4 text-left transition ${selectedIndex === index ? "border-lime-300 bg-lime-300 text-black" : "border-white/10 bg-black/30 text-white hover:bg-white/10"}`}>
+                  <span className="text-xs font-black uppercase tracking-[0.25em] opacity-70">Frage {index + 1}</span>
+                  <span className="mt-2 line-clamp-2 block text-base font-bold">{question.question || "Neue Frage ohne Text"}</span>
+                </button>
+              ))}
+            </div>
+          </aside>
 
-                <div className="flex flex-wrap gap-3">
-                  {categories.map((category) => {
-                    const active = categoryFilter === category;
+          <section className="rounded-[38px] border border-white/10 bg-white/[0.055] p-5 shadow-2xl shadow-black/30 backdrop-blur md:p-7">
+            <div className="mb-6 grid gap-4 md:grid-cols-2">
+              <EditorInput label="Quiz-Titel" value={title} onChange={setTitle} />
+              <EditorInput label="Kategorie" value={category} onChange={setCategory} />
+              <label className="block md:col-span-2">
+                <span className="mb-2 block text-xs font-black uppercase tracking-[0.28em] text-zinc-500">Call to Action</span>
+                <input value={cta} onChange={(event) => setCta(event.target.value)} className="h-14 w-full rounded-2xl border border-white/10 bg-black/40 px-5 text-lg font-semibold text-white outline-none focus:border-lime-300" />
+              </label>
+            </div>
 
-                    return (
-                      <button
-                        key={category}
-                        type="button"
-                        onClick={() => setCategoryFilter(category)}
-                        className={`rounded-full border px-5 py-3 text-sm font-bold transition ${
-                          active
-                            ? "border-lime-400 bg-lime-400 text-black"
-                            : "border-zinc-800 bg-zinc-900 text-zinc-300 hover:bg-zinc-800"
-                        }`}
-                      >
-                        {category}
-                      </button>
-                    );
-                  })}
+            {selectedQuestion ? (
+              <div className="rounded-[32px] border border-white/10 bg-black/35 p-5 md:p-6">
+                <div className="mb-5 flex flex-col gap-3 md:flex-row md:items-center md:justify-between">
+                  <div>
+                    <p className="text-xs font-black uppercase tracking-[0.32em] text-lime-300">Editor</p>
+                    <h2 className="mt-2 text-3xl font-black tracking-[-0.04em]">Frage {selectedIndex + 1}</h2>
+                  </div>
+                  <div className="flex gap-2">
+                    <button type="button" onClick={() => duplicateQuestion(selectedIndex)} className="rounded-2xl border border-white/10 px-4 py-3 text-sm font-bold text-zinc-200 hover:bg-white/10">Duplizieren</button>
+                    <button type="button" onClick={() => removeQuestion(selectedIndex)} className="rounded-2xl border border-red-400/30 bg-red-500/10 px-4 py-3 text-sm font-bold text-red-100 hover:bg-red-500/20">Löschen</button>
+                  </div>
+                </div>
+
+                <label className="block">
+                  <span className="mb-2 block text-xs font-black uppercase tracking-[0.28em] text-zinc-500">Fragetext</span>
+                  <textarea value={selectedQuestion.question} onChange={(event) => updateQuestion(selectedIndex, { question: event.target.value })} rows={4} className="w-full rounded-[26px] border border-white/10 bg-zinc-950/80 px-5 py-4 text-xl font-bold leading-8 text-white outline-none focus:border-lime-300" />
+                </label>
+
+                <div className="mt-5 grid gap-4">
+                  {(["A", "B", "C"] as const).map((letter) => (
+                    <AnswerInput key={letter} letter={letter} value={selectedQuestion[`answer${letter}`]} checked={selectedQuestion.correctAnswer === letter} onTextChange={(value) => updateQuestion(selectedIndex, { [`answer${letter}`]: value })} onCorrectChange={() => updateQuestion(selectedIndex, { correctAnswer: letter })} />
+                  ))}
                 </div>
               </div>
-            </div>
+            ) : null}
           </section>
+
+          <aside className="xl:sticky xl:top-28 xl:self-start">
+            <PhonePreview title={title} category={category} question={selectedQuestion} index={selectedIndex} total={questions.length} answered={answeredQuestions} />
+          </aside>
         </div>
-
-        {filteredQuizzes.length === 0 ? (
-          <section className="rounded-[40px] border border-zinc-800 bg-zinc-950 px-8 py-16 text-center md:px-16">
-            <h2 className="text-3xl font-bold md:text-5xl">
-              Keine Quizze gefunden
-            </h2>
-
-            {quizzes.length === 0 ? (
-              <p className="mx-auto mt-6 max-w-3xl text-lg text-zinc-400 md:text-2xl">
-                Du hast aktuell noch kein Quiz gespeichert. Erstelle jetzt dein
-                erstes Fußball-Quiz.
-              </p>
-            ) : (
-              <p className="mx-auto mt-6 max-w-3xl text-lg text-zinc-400 md:text-2xl">
-                Für deinen aktuellen Suchbegriff oder Filter wurde kein Quiz
-                gefunden.
-              </p>
-            )}
-
-            <div className="mt-8">
-              <Link
-                href="/new-quiz"
-                className="inline-flex rounded-[28px] bg-lime-400 px-6 py-4 text-lg font-bold text-black transition hover:bg-lime-300"
-              >
-                + Neues Quiz erstellen
-              </Link>
-            </div>
-          </section>
-        ) : (
-          <div className="grid gap-6 xl:grid-cols-2 2xl:grid-cols-3">
-            {filteredQuizzes.map((quiz) => (
-              <QuizCard
-                key={quiz.id}
-                quiz={quiz}
-                onDelete={() => handleDeleteQuiz(quiz.id)}
-              />
-            ))}
-          </div>
-        )}
       </div>
     </main>
   );
 }
 
-function QuizCard({
-  quiz,
-  onDelete,
-}: {
-  quiz: SavedQuiz;
-  onDelete: () => void;
-}) {
-  const createdAt = formatDate(quiz.createdAt);
-  const firstQuestions = quiz.questions.slice(0, 3);
-
-  return (
-    <article className="rounded-[36px] border border-zinc-800 bg-zinc-950 p-6 md:p-8">
-      <div className="mb-6 flex items-start justify-between gap-4">
-        <div className="min-w-0">
-          <p className="text-sm uppercase tracking-[0.3em] text-zinc-500">
-            {quiz.category || "Fußball Quiz"}
-          </p>
-          <h3 className="mt-3 break-words text-2xl font-black tracking-[-0.03em] text-white md:text-4xl">
-            {quiz.title}
-          </h3>
-          <p className="mt-3 text-sm text-zinc-500 md:text-base">
-            Erstellt am {createdAt}
-          </p>
-        </div>
-
-        <div className="rounded-full border border-lime-500/30 bg-lime-500/10 px-4 py-2 text-sm font-bold text-lime-300">
-          {quiz.questions.length}{" "}
-          {quiz.questions.length === 1 ? "Frage" : "Fragen"}
-        </div>
-      </div>
-
-      <div className="grid gap-4">
-        <InfoBox label="CTA" value={quiz.cta || "—"} />
-
-        <div className="rounded-[24px] border border-zinc-800 bg-black/40 p-5">
-          <p className="text-sm uppercase tracking-[0.3em] text-zinc-500">
-            Vorschau der ersten Fragen
-          </p>
-
-          <div className="mt-4 space-y-3">
-            {firstQuestions.length > 0 ? (
-              firstQuestions.map((question, index) => (
-                <div
-                  key={`${quiz.id}-${index}`}
-                  className="rounded-[18px] border border-zinc-800 bg-zinc-950 px-4 py-3"
-                >
-                  <div className="flex items-start gap-3">
-                    <div className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-lime-400 text-sm font-black text-black">
-                      {index + 1}
-                    </div>
-                    <p className="text-sm leading-6 text-zinc-200 md:text-base">
-                      {question.question || "Keine Frage eingetragen"}
-                    </p>
-                  </div>
-                </div>
-              ))
-            ) : (
-              <p className="text-zinc-500">Keine Fragen vorhanden.</p>
-            )}
-          </div>
-        </div>
-      </div>
-
-      <div className="mt-6 flex flex-wrap gap-3">
-        <Link
-          href={`/my-quizzes/${quiz.id}`}
-          className="rounded-[22px] bg-lime-400 px-5 py-3 text-sm font-bold text-black transition hover:bg-lime-300 md:text-base"
-        >
-          Quiz öffnen
-        </Link>
-
-        <Link
-          href={`/my-quizzes/${quiz.id}/slides`}
-          className="rounded-[22px] border border-zinc-800 px-5 py-3 text-sm font-semibold text-white transition hover:bg-zinc-900 md:text-base"
-        >
-          Zu den Slides
-        </Link>
-
-        <button
-          type="button"
-          onClick={onDelete}
-          className="rounded-[22px] border border-red-500/30 bg-red-500/10 px-5 py-3 text-sm font-semibold text-red-200 transition hover:bg-red-500/20 md:text-base"
-        >
-          Löschen
-        </button>
-      </div>
-    </article>
-  );
+function ToolbarInput({ label, value, onChange, type = "text", min, max }: { label: string; value: string; onChange: (value: string) => void; type?: string; min?: number; max?: number }) {
+  return <label className="block"><span className="mb-2 block text-xs font-black uppercase tracking-[0.28em] text-zinc-500">{label}</span><input type={type} min={min} max={max} value={value} onChange={(event) => onChange(event.target.value)} className="h-12 w-full rounded-2xl border border-white/10 bg-black/50 px-4 font-bold text-white outline-none placeholder:text-zinc-600 focus:border-lime-300" /></label>;
 }
 
-function DashboardCard({
-  label,
-  value,
-}: {
-  label: string;
-  value: string;
-}) {
-  return (
-    <div className="rounded-[24px] border border-zinc-800 bg-black/40 p-5">
-      <p className="text-sm uppercase tracking-[0.3em] text-zinc-500">
-        {label}
-      </p>
-      <p className="mt-3 text-3xl font-black text-white md:text-4xl">
-        {value}
-      </p>
-    </div>
-  );
+function ToolbarButton({ children, onClick, variant = "secondary" }: { children: ReactNode; onClick: () => void; variant?: "primary" | "secondary" }) {
+  return <button type="button" onClick={onClick} className={`h-12 rounded-2xl px-5 text-sm font-black transition ${variant === "primary" ? "bg-lime-300 text-black hover:bg-lime-200" : "border border-white/10 bg-white/10 text-white hover:bg-white/15"}`}>{children}</button>;
 }
 
-function InfoBox({
-  label,
-  value,
-}: {
-  label: string;
-  value: string;
-}) {
-  return (
-    <div className="rounded-[24px] border border-zinc-800 bg-black/40 p-5">
-      <p className="text-sm uppercase tracking-[0.3em] text-zinc-500">
-        {label}
-      </p>
-      <p className="mt-3 break-words text-base leading-7 text-zinc-200 md:text-lg">
-        {value}
-      </p>
-    </div>
-  );
+function EditorInput({ label, value, onChange }: { label: string; value: string; onChange: (value: string) => void }) {
+  return <label className="block"><span className="mb-2 block text-xs font-black uppercase tracking-[0.28em] text-zinc-500">{label}</span><input value={value} onChange={(event) => onChange(event.target.value)} className="h-14 w-full rounded-2xl border border-white/10 bg-black/40 px-5 text-lg font-semibold text-white outline-none focus:border-lime-300" /></label>;
 }
 
-function formatDate(value: string) {
-  try {
-    return new Date(value).toLocaleDateString("de-DE", {
-      day: "2-digit",
-      month: "2-digit",
-      year: "numeric",
-    });
-  } catch {
-    return "Unbekannt";
-  }
+function AnswerInput({ letter, value, checked, onTextChange, onCorrectChange }: { letter: "A" | "B" | "C"; value: string; checked: boolean; onTextChange: (value: string) => void; onCorrectChange: () => void }) {
+  return <div className={`rounded-[26px] border p-4 ${checked ? "border-lime-300/70 bg-lime-300/10" : "border-white/10 bg-zinc-950/70"}`}><div className="flex gap-3"><button type="button" onClick={onCorrectChange} className={`flex h-12 w-12 shrink-0 items-center justify-center rounded-2xl text-lg font-black ${checked ? "bg-lime-300 text-black" : "bg-white/10 text-white"}`}>{letter}</button><input value={value} onChange={(event) => onTextChange(event.target.value)} placeholder={`Antwort ${letter}`} className="min-w-0 flex-1 bg-transparent text-lg font-semibold text-white outline-none placeholder:text-zinc-600" /></div></div>;
+}
+
+function PhonePreview({ title, category, question, index, total, answered }: { title: string; category: string; question?: QuizQuestion; index: number; total: number; answered: number }) {
+  return <div className="rounded-[42px] border border-white/10 bg-white/[0.05] p-4 shadow-2xl shadow-black/50 backdrop-blur"><div className="mx-auto aspect-[9/16] max-h-[720px] rounded-[36px] border border-zinc-700 bg-gradient-to-br from-zinc-950 via-black to-lime-950 p-5 shadow-inner"><div className="flex items-center justify-between text-xs font-black uppercase tracking-[0.24em] text-lime-200"><span>{category || "Fußball"}</span><span>{index + 1}/{total}</span></div><div className="mt-10 rounded-[28px] border border-white/10 bg-white/10 p-5"><p className="text-sm font-bold uppercase tracking-[0.25em] text-zinc-400">{title || "QuizArena Quiz"}</p><h3 className="mt-4 text-3xl font-black leading-tight tracking-[-0.04em]">{question?.question || "Wähle links eine Frage aus."}</h3></div><div className="mt-6 space-y-3">{(["A", "B", "C"] as const).map((letter) => <div key={letter} className={`rounded-2xl border px-4 py-3 ${question?.correctAnswer === letter ? "border-lime-300 bg-lime-300 text-black" : "border-white/10 bg-black/35 text-white"}`}><span className="font-black">{letter}</span><span className="ml-3 font-bold">{question?.[`answer${letter}`] || `Antwort ${letter}`}</span></div>)}</div><div className="mt-6 rounded-2xl border border-white/10 bg-black/30 p-4 text-sm font-bold text-zinc-300">{answered} von {total} Fragen mit Inhalt</div></div></div>;
+}
+
+function createGeneratedQuestions(topic: string, difficulty: Difficulty, count: number): QuizQuestion[] {
+  const safeCount = clamp(count, 1, 10);
+  return Array.from({ length: safeCount }, (_, index) => {
+    const number = index + 1;
+    return {
+      question: `${difficulty}-Frage ${number}: Welche Aussage passt am besten zu ${topic}?`,
+      answerA: `${topic} Fakt ${number}`,
+      answerB: `${topic} Mythos ${number}`,
+      answerC: `${topic} Überraschung ${number}`,
+      correctAnswer: (["A", "B", "C"] as const)[index % 3],
+    };
+  });
+}
+
+function normalizeQuestion(question: QuizQuestion): QuizQuestion {
+  return {
+    question: question.question.trim(),
+    answerA: question.answerA.trim(),
+    answerB: question.answerB.trim(),
+    answerC: question.answerC.trim(),
+    correctAnswer: question.correctAnswer,
+  };
+}
+
+function hasQuestionContent(question: QuizQuestion) {
+  return Boolean(question.question.trim() || question.answerA.trim() || question.answerB.trim() || question.answerC.trim());
+}
+
+function clamp(value: number, min: number, max: number) {
+  if (Number.isNaN(value)) return min;
+  return Math.min(max, Math.max(min, value));
+}
+
+function slugify(value: string) {
+  return (value || "quiz").toLowerCase().replace(/[^a-z0-9äöüß]+/gi, "-").replace(/^-+|-+$/g, "") || "quiz";
+}
+
+function createId() {
+  if (typeof crypto !== "undefined" && "randomUUID" in crypto) return crypto.randomUUID();
+  return `quiz_${Date.now()}_${Math.random().toString(36).slice(2, 9)}`;
 }
